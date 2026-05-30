@@ -12,9 +12,22 @@ type TriagePanelProps = {
 };
 
 export function TriagePanel({ triage, ordersById, onApplyPlan, onOverride }: TriagePanelProps) {
+  if (!triage.capacity_tight) {
+    return (
+      <section className="panel triage-panel monitoring">
+        <PanelTitle icon={<ShieldAlert />} title="Triage" detail="Monitoring" />
+        <div className="triage-idle">
+          <strong>Monitoring - no action needed</strong>
+          <span>Capacity is within plan. Recommendations stay quiet until fleet capacity or demand creates real strain.</span>
+        </div>
+      </section>
+    );
+  }
+
   return (
-    <section className="panel triage-panel">
-      <PanelTitle icon={<ShieldAlert />} title="Triage" detail={triage.capacity_tight ? "Capacity constrained" : "Monitoring"} />
+    <section className="panel triage-panel constrained">
+      <PanelTitle icon={<ShieldAlert />} title="Triage" detail="Capacity constrained" />
+      <div className="action-badge">Operator action recommended</div>
       <div className="triage-summary">
         <Stat label="Medical protected" value={triage.summary.medical_orders_protected} />
         <Stat label="Retail deferred" value={triage.summary.retail_deferred} />
