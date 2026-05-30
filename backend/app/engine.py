@@ -255,6 +255,25 @@ def fold(events: list[Event]) -> dict[str, Any]:
                         "charge_complete_at": p["completed_at"] + CHARGE_MINUTES,
                     }
                 )
+        elif event.type == "MISSION_ABORTED":
+            mission = state["missions"].setdefault(
+                event.entity_id,
+                {"id": event.entity_id, "order_id": p.get("order_id"), "aircraft_id": p.get("aircraft_id")},
+            )
+            mission.update({"state": "aborted", "aborted_at": p["aborted_at"], "reason": p.get("reason", "aborted")})
+            order_id = mission.get("order_id", p.get("order_id"))
+            aircraft_id = mission.get("aircraft_id", p.get("aircraft_id"))
+            if order_id and order_id in state["orders"]:
+                state["orders"][order_id].update({"state": "pending", "assigned_aircraft_id": None, "mission_id": None})
+            if aircraft_id and aircraft_id in state["fleet"]:
+                state["fleet"][aircraft_id].update(
+                    {
+                        "state": "grounded",
+                        "current_mission_id": None,
+                        "charge_complete_at": None,
+                        "grounded_until": p.get("grounded_until"),
+                    }
+                )
         elif event.type == "INTERVENTION_RECORDED":
             state["interventions"].append({"id": event.id, "ts": event.ts, **p})
         state["events"].append(event)
@@ -374,6 +393,10 @@ def reconstruct_order_state(events: list[Event], order_id: str) -> dict[str, Any
             if order is None:
                 order = {"id": order_id}
             order.update({"state": "delivered"})
+        elif event.type == "MISSION_ABORTED" and (p.get("order_id") == order_id or event.entity_id in related_missions):
+            if order is None:
+                order = {"id": order_id}
+            order.update({"state": "pending", "assigned_aircraft_id": None, "mission_id": None})
     return order
 
 
@@ -466,6 +489,8 @@ def tick(store: EventStore, minutes: int = 1) -> dict[str, Any]:
         if aircraft["state"] == "charging" and aircraft.get("charge_complete_at") is not None and aircraft["charge_complete_at"] <= new_clock:
             store.append("AIRCRAFT_STATUS_SET", "aircraft", aircraft["id"], {"state": "ready", "battery_pct": 96, "charge_complete_at": None})
     state = fold(store.list())
+    if state["nest"].get("weather_state") == "storm_front":
+        return state
     ready_aircraft = [a for a in state["fleet"] if a["state"] == "ready" and a["battery_pct"] >= 35]
     pending = [o for o in state["orders"] if o["state"] == "pending"]
     for aircraft, order in zip(ready_aircraft, sorted(pending, key=lambda o: order_sort_key(o, state["clock"]))):
@@ -484,10 +509,33 @@ def tick(store: EventStore, minutes: int = 1) -> dict[str, Any]:
 def inject_storm(store: EventStore) -> dict[str, Any]:
     state = fold(store.list())
     store.append("NEST_WEATHER_SET", "nest", "NEST-01", {"weather_state": "storm_front", "status": "degraded"})
-    ready_or_charging = [a for a in state["fleet"] if a["state"] in {"ready", "charging"}]
-    for aircraft in ready_or_charging[: max(1, len(ready_or_charging) // 2)]:
-        store.append("AIRCRAFT_STATUS_SET", "aircraft", aircraft["id"], {"state": "grounded", "grounded_until": state["clock"] + 30})
-    store.append("SCENARIO_INJECTED", "scenario", "storm-front", {"name": "Storm front grounded half the fleet."})
+    groundable = [a for a in state["fleet"] if a["state"] not in {"grounded", "maintenance"}]
+    to_ground_count = max(0, len(groundable) - 2)
+    active_by_aircraft = {mission["aircraft_id"]: mission for mission in state["active_missions"]}
+    for aircraft in groundable[:to_ground_count]:
+        grounded_until = state["clock"] + 30
+        mission = active_by_aircraft.get(aircraft["id"])
+        if mission:
+            store.append(
+                "MISSION_ABORTED",
+                "mission",
+                mission["id"],
+                {
+                    "order_id": mission["order_id"],
+                    "aircraft_id": aircraft["id"],
+                    "aborted_at": state["clock"],
+                    "reason": "storm front forced aircraft down",
+                    "grounded_until": grounded_until,
+                },
+            )
+        else:
+            store.append(
+                "AIRCRAFT_STATUS_SET",
+                "aircraft",
+                aircraft["id"],
+                {"state": "grounded", "current_mission_id": None, "charge_complete_at": None, "grounded_until": grounded_until},
+            )
+    store.append("SCENARIO_INJECTED", "scenario", "storm-front", {"name": "Storm front grounded fleet to two operational aircraft."})
     return fold(store.list())
 
 
