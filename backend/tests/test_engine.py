@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.engine import EventStore, apply_triage, fold, make_triage, override_order, seed, timeline
+from app.engine import EventStore, apply_triage, check_invariants, fold, make_triage, override_order, seed, timeline
 from app.main import app
 
 
@@ -55,6 +55,30 @@ def test_no_double_assignment_invariant_catches_invalid_state(tmp_path: Path):
     state = fold(store.list())
     check = next(item for item in state["invariants"] if item["name"] == "No double-assignment")
     assert check["ok"] is False
+
+
+def test_no_lost_orders_invariant_catches_dropped_folded_order(tmp_path: Path):
+    store = make_store(tmp_path)
+    events = store.list()
+    state = fold(events)
+    state["orders"] = [order for order in state["orders"] if order["id"] != "O-001"]
+    check = next(item for item in check_invariants(state, events) if item["name"] == "No lost orders")
+    assert check["ok"] is False
+    assert "O-001" in check["detail"]
+
+
+def test_p0_protection_allows_logged_override_and_blocks_silent_deferral(tmp_path: Path):
+    authorized = make_store(tmp_path / "authorized")
+    authorized_state = override_order(authorized, "O-001", "deferred", "Rohan", "Hospital requested ground clinical courier.")
+    authorized_check = next(item for item in authorized_state["invariants"] if item["name"] == "P0 protection")
+    assert authorized_check["ok"] is True
+
+    unauthorized = make_store(tmp_path / "unauthorized")
+    unauthorized.append("ORDER_STATE_SET", "order", "O-001", {"state": "deferred"})
+    unauthorized_state = fold(unauthorized.list())
+    unauthorized_check = next(item for item in unauthorized_state["invariants"] if item["name"] == "P0 protection")
+    assert unauthorized_check["ok"] is False
+    assert "O-001" in unauthorized_check["detail"]
 
 
 def test_timeline_reconstructs_order_history(tmp_path: Path):
