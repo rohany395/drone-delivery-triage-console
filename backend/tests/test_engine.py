@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.engine import EventStore, apply_triage, check_invariants, fold, make_triage, override_order, seed, timeline
+from app.engine import EventStore, apply_triage, check_invariants, fold, inject_storm, make_triage, override_order, seed, tick, timeline
 from app.main import app
 
 
@@ -79,6 +79,38 @@ def test_p0_protection_allows_logged_override_and_blocks_silent_deferral(tmp_pat
     unauthorized_check = next(item for item in unauthorized_state["invariants"] if item["name"] == "P0 protection")
     assert unauthorized_check["ok"] is False
     assert "O-001" in unauthorized_check["detail"]
+
+
+def test_storm_at_clock_zero_constrains_capacity_and_preserves_invariants(tmp_path: Path):
+    store = make_store(tmp_path)
+    state = inject_storm(store)
+    assert state["metrics"]["capacity_tight"] is True
+    assert state["metrics"]["operational_aircraft"] <= 2
+    assert all(check["ok"] for check in state["invariants"])
+
+    ticked = tick(store)
+    assert ticked["metrics"]["capacity_tight"] is True
+    assert all(check["ok"] for check in ticked["invariants"])
+
+
+def test_storm_after_ticks_aborts_flights_and_preserves_invariants(tmp_path: Path):
+    store = make_store(tmp_path)
+    for _ in range(5):
+        tick(store)
+
+    before_storm = fold(store.list())
+    assert before_storm["active_missions"]
+
+    storm = inject_storm(store)
+    assert storm["metrics"]["capacity_tight"] is True
+    assert storm["metrics"]["operational_aircraft"] <= 2
+    assert len(storm["active_missions"]) <= 2
+    assert any(mission["state"] == "aborted" for mission in storm["missions"].values())
+    assert all(check["ok"] for check in storm["invariants"])
+
+    ticked = tick(store)
+    assert ticked["metrics"]["capacity_tight"] is True
+    assert all(check["ok"] for check in ticked["invariants"])
 
 
 def test_timeline_reconstructs_order_history(tmp_path: Path):
