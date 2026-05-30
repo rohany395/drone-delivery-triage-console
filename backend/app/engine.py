@@ -205,7 +205,6 @@ def fold(events: list[Event]) -> dict[str, Any]:
         "interventions": [],
         "events": [],
     }
-    order_event_counts: dict[str, int] = {}
     for event in events:
         p = event.payload
         if event.type == "CLOCK_SET":
@@ -224,10 +223,8 @@ def fold(events: list[Event]) -> dict[str, Any]:
             state["fleet"].setdefault(event.entity_id, {"id": event.entity_id}).update({"battery_pct": p["battery_pct"]})
         elif event.type == "ORDER_CREATED":
             state["orders"][event.entity_id] = {"id": event.entity_id, "assigned_aircraft_id": None, "mission_id": None, **p}
-            order_event_counts[event.entity_id] = order_event_counts.get(event.entity_id, 0) + 1
         elif event.type in {"ORDER_STATE_SET", "ORDER_ASSIGNED"}:
             state["orders"].setdefault(event.entity_id, {"id": event.entity_id}).update(p)
-            order_event_counts[event.entity_id] = order_event_counts.get(event.entity_id, 0) + 1
         elif event.type == "MISSION_LAUNCHED":
             mission = {
                 "id": event.entity_id,
@@ -249,7 +246,6 @@ def fold(events: list[Event]) -> dict[str, Any]:
             aircraft_id = mission.get("aircraft_id", p.get("aircraft_id"))
             if order_id and order_id in state["orders"]:
                 state["orders"][order_id].update({"state": "delivered"})
-                order_event_counts[order_id] = order_event_counts.get(order_id, 0) + 1
             if aircraft_id and aircraft_id in state["fleet"]:
                 state["fleet"][aircraft_id].update(
                     {
@@ -284,7 +280,7 @@ def fold(events: list[Event]) -> dict[str, Any]:
         "sla_risk": len(risky),
         "capacity_tight": len(pending) > max(8, len(operational) * 5) or demand_rate > throughput * 1.15,
     }
-    state["invariants"] = check_invariants(state, order_event_counts)
+    state["invariants"] = check_invariants(state, events)
     del state["events"]
     return state
 
@@ -358,7 +354,30 @@ def state_order(state: dict[str, Any], order_id: str) -> dict[str, Any]:
     return next(o for o in state["orders"] if o["id"] == order_id)
 
 
-def check_invariants(state: dict[str, Any], order_event_counts: dict[str, int]) -> list[dict[str, Any]]:
+def reconstruct_order_state(events: list[Event], order_id: str) -> dict[str, Any] | None:
+    order: dict[str, Any] | None = None
+    related_missions: set[str] = set()
+    for event in events:
+        p = event.payload
+        if event.type == "ORDER_CREATED" and event.entity_id == order_id:
+            order = {"id": event.entity_id, "assigned_aircraft_id": None, "mission_id": None, **p}
+        elif event.type in {"ORDER_STATE_SET", "ORDER_ASSIGNED"} and event.entity_id == order_id:
+            if order is None:
+                order = {"id": event.entity_id}
+            order.update(p)
+        elif event.type == "MISSION_LAUNCHED" and p.get("order_id") == order_id:
+            related_missions.add(event.entity_id)
+            if order is None:
+                order = {"id": order_id}
+            order.update({"state": "in_flight", "mission_id": event.entity_id, "assigned_aircraft_id": p["aircraft_id"]})
+        elif event.type == "MISSION_COMPLETED" and (p.get("order_id") == order_id or event.entity_id in related_missions):
+            if order is None:
+                order = {"id": order_id}
+            order.update({"state": "delivered"})
+    return order
+
+
+def check_invariants(state: dict[str, Any], events: list[Event]) -> list[dict[str, Any]]:
     orders = state["orders"] if isinstance(state["orders"], list) else list(state["orders"].values())
     active = state["active_missions"] if "active_missions" in state else [m for m in state["missions"].values() if m.get("state") == "active"]
     aircraft_counts: dict[str, int] = {}
@@ -366,12 +385,46 @@ def check_invariants(state: dict[str, Any], order_event_counts: dict[str, int]) 
     for mission in active:
         aircraft_counts[mission["aircraft_id"]] = aircraft_counts.get(mission["aircraft_id"], 0) + 1
         order_counts[mission["order_id"]] = order_counts.get(mission["order_id"], 0) + 1
-    valid_states = {"pending", "assigned", "in_flight", "delivered", "deferred", "ground_fallback", "failed"}
+
+    created_ids = [event.entity_id for event in events if event.type == "ORDER_CREATED"]
+    created_set = set(created_ids)
+    live_ids = [order["id"] for order in orders]
+    live_set = set(live_ids)
+    duplicate_created = sorted({order_id for order_id in created_ids if created_ids.count(order_id) > 1})
+    duplicate_live = sorted({order_id for order_id in live_ids if live_ids.count(order_id) > 1})
+    missing = sorted(created_set - live_set)
+    extra = sorted(live_set - created_set)
+    no_lost_ok = not duplicate_created and not duplicate_live and created_set == live_set
+
+    drifted = []
+    for order in orders:
+        reconstructed = reconstruct_order_state(events, order["id"])
+        if reconstructed != order:
+            drifted.append(order["id"])
+
+    authorized_p0_deferrals = {
+        intervention["order_id"]
+        for intervention in state.get("interventions", [])
+        if intervention.get("type") == "manual_override"
+        and intervention.get("target_action") == "deferred"
+        and bool(str(intervention.get("operator", "")).strip())
+        and bool(str(intervention.get("reason", "")).strip())
+    }
+    unauthorized_p0_deferrals = sorted(
+        order["id"]
+        for order in orders
+        if order.get("priority_tier") == "P0" and order.get("state") == "deferred" and order["id"] not in authorized_p0_deferrals
+    )
+
     return [
         {
             "name": "No lost orders",
-            "ok": all(o.get("state") in valid_states for o in orders),
-            "detail": f"{len(orders)} orders accounted for in one visible state.",
+            "ok": no_lost_ok,
+            "detail": (
+                f"{len(created_set)} created, {len(live_set)} folded. "
+                f"duplicate_created={duplicate_created or 'none'}, duplicate_live={duplicate_live or 'none'}, "
+                f"missing={missing or 'none'}, extra={extra or 'none'}."
+            ),
         },
         {
             "name": "No double-assignment",
@@ -380,8 +433,8 @@ def check_invariants(state: dict[str, Any], order_event_counts: dict[str, int]) 
         },
         {
             "name": "Timeline reconstructable",
-            "ok": all(order_event_counts.get(o["id"], 0) >= 1 for o in orders),
-            "detail": "Each order has one or more order events.",
+            "ok": not drifted,
+            "detail": f"Drifted order ids: {drifted or 'none'}.",
         },
         {
             "name": "Attributed interventions",
@@ -390,8 +443,8 @@ def check_invariants(state: dict[str, Any], order_event_counts: dict[str, int]) 
         },
         {
             "name": "P0 protection",
-            "ok": all(not (o["priority_tier"] == "P0" and o["state"] == "deferred") for o in orders),
-            "detail": "No clinical-critical order was auto-deferred.",
+            "ok": not unauthorized_p0_deferrals,
+            "detail": f"Unauthorized P0 deferrals: {unauthorized_p0_deferrals or 'none'}.",
         },
     ]
 
