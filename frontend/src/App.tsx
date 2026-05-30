@@ -21,6 +21,7 @@ export function App() {
   const [overrideAction, setOverrideAction] = useState("ground_fallback");
   const [operator, setOperator] = useState("Rohan");
   const [reason, setReason] = useState("");
+  const [running, setRunning] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -35,12 +36,15 @@ export function App() {
 
   useEffect(() => {
     refresh();
-    const timer = window.setInterval(async () => {
-      await request<AppState>("/api/sim/tick", { method: "POST", body: JSON.stringify({ minutes: 1 }) }).catch(() => null);
-      refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      stepOnce();
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [running]);
 
   useEffect(() => {
     if (!selectedOrder) return;
@@ -54,6 +58,14 @@ export function App() {
 
   async function scenario(path: string) {
     await request<AppState>(path, { method: "POST" });
+    if (path === "/api/sim/reset") {
+      setRunning(false);
+    }
+    await refresh();
+  }
+
+  async function stepOnce() {
+    await request<AppState>("/api/sim/tick", { method: "POST", body: JSON.stringify({ minutes: 1 }) });
     await refresh();
   }
 
@@ -86,8 +98,13 @@ export function App() {
   return (
     <main className="app-shell">
       <TopStrip state={state} gaugePct={gaugePct} />
+      <div className={state.metrics.capacity_tight ? "situation constrained" : "situation healthy"}>
+        {state.metrics.capacity_tight
+          ? `Constrained - ${state.metrics.operational_aircraft} aircraft operating, ${state.metrics.sla_risk} orders at SLA risk. Review triage.`
+          : `Healthy - ${state.metrics.ready_aircraft} of ${state.fleet.length} aircraft ready, queue clearing.`}
+      </div>
       {error && <div className="banner">{error}</div>}
-      <ScenarioToolbar onScenario={scenario} />
+      <ScenarioToolbar onScenario={scenario} running={running} onStep={stepOnce} onToggleRunning={() => setRunning((value) => !value)} />
 
       <section className="grid">
         <FleetPanel state={state} />
