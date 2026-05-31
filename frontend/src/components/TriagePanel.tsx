@@ -63,8 +63,11 @@ function PlanColumn({
       {items.slice(0, 7).map((item) => {
         const order = byId.get(item.order_id);
         return (
-          <article key={item.order_id}>
-            <span>{order?.priority_tier ?? "?"}</span>
+          <article key={item.order_id} className={classNames(item.committed && "committed-item")}>
+            <div className="plan-item-header">
+              <span>{order?.priority_tier ?? "?"}</span>
+              {item.committed && <span className="committed-pill">Moved</span>}
+            </div>
             <strong>{item.order_id}</strong>
             <p>{item.rationale}</p>
             {order && <button onClick={() => onOverride(order)}><UserPen size={14} /> Override</button>}

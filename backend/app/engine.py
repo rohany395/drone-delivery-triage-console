@@ -340,7 +340,26 @@ def make_triage(state: dict[str, Any]) -> dict[str, Any]:
             action = "defer"
         else:
             action = "ground_fallback"
-        plan[action].append({"order_id": order["id"], "rationale": rationale(order, action, state["clock"])})
+        plan[action].append({"order_id": order["id"], "rationale": rationale(order, action, state["clock"]), "committed": False})
+
+    recommendation_plan = {key: list(items) for key, items in plan.items()}
+    committed_columns = {"deferred": "defer", "ground_fallback": "ground_fallback"}
+    committed_items = {"defer": [], "ground_fallback": []}
+    for order in state["orders"]:
+        column = committed_columns.get(order["state"])
+        if not column:
+            continue
+        for items in plan.values():
+            items[:] = [item for item in items if item["order_id"] != order["id"]]
+        committed_items[column].append(
+            {
+                "order_id": order["id"],
+                "rationale": committed_rationale(state, order["id"]),
+                "committed": True,
+            }
+        )
+    plan["defer"] = committed_items["defer"] + plan["defer"]
+    plan["ground_fallback"] = committed_items["ground_fallback"] + plan["ground_fallback"]
 
     fifo = sorted(pending, key=lambda o: (o["created_at"], o["id"]))
     fifo_protected = fifo[:protect_slots]
@@ -348,7 +367,7 @@ def make_triage(state: dict[str, Any]) -> dict[str, Any]:
     triage_deferred_p0 = 0
     fifo_deferred_p0 = len([o for o in fifo_deferred if o["priority_tier"] == "P0"])
     medical_protected = len(
-        [item for item in plan["protect_now"] if state_order(state, item["order_id"])["priority_tier"] in {"P0", "P1"}]
+        [item for item in recommendation_plan["protect_now"] if state_order(state, item["order_id"])["priority_tier"] in {"P0", "P1"}]
     )
     return {
         "capacity_tight": state["metrics"]["capacity_tight"],
@@ -356,7 +375,9 @@ def make_triage(state: dict[str, Any]) -> dict[str, Any]:
         "plan": plan,
         "summary": {
             "medical_orders_protected": medical_protected,
-            "retail_deferred": len([item for item in plan["defer"] if state_order(state, item["order_id"])["priority_tier"] == "P2"]),
+            "retail_deferred": len(
+                [item for item in recommendation_plan["defer"] if state_order(state, item["order_id"])["priority_tier"] == "P2"]
+            ),
             "p0_auto_deferred": triage_deferred_p0,
             "sla_breaches_avoided_vs_fifo": fifo_deferred_p0,
             "estimated_delay_minutes": 24 if state["metrics"]["capacity_tight"] else 8,
@@ -367,6 +388,18 @@ def make_triage(state: dict[str, Any]) -> dict[str, Any]:
             "risk": "FIFO can spend scarce launches on low-priority early retail before newer clinical-critical orders.",
         },
     }
+
+
+def committed_rationale(state: dict[str, Any], order_id: str) -> str:
+    interventions = [item for item in state.get("interventions", []) if item.get("order_id") == order_id]
+    if not interventions:
+        return "Already moved; committed state."
+    latest = sorted(interventions, key=lambda item: item["id"])[-1]
+    if latest.get("type") == "manual_override":
+        return "Moved by operator override."
+    if latest.get("type") == "triage_apply":
+        return "Moved by applied triage plan."
+    return "Already moved; committed state."
 
 
 def state_order(state: dict[str, Any], order_id: str) -> dict[str, Any]:
@@ -580,6 +613,8 @@ def apply_triage(store: EventStore, operator: str = "ops-console") -> dict[str, 
     triage = make_triage(state)
     for action in ("defer", "ground_fallback"):
         for item in triage["plan"][action]:
+            if item.get("committed"):
+                continue
             order = state_order(state, item["order_id"])
             if order["priority_tier"] == "P0" and action == "defer":
                 continue

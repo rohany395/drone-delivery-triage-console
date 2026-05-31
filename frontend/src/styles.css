@@ -484,6 +484,17 @@ small {
   padding: 8px;
 }
 
+.plan-column article.committed-item {
+  background: #f2f5f4;
+  border-style: dashed;
+}
+
+.plan-item-header {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
 .plan-column span {
   border-radius: 4px;
   color: #fff;
@@ -503,6 +514,12 @@ small {
 
 .fallback span {
   background: #365268;
+}
+
+.plan-column .committed-pill {
+  background: #cbd7d2;
+  color: #33483f;
+  text-transform: uppercase;
 }
 
 .plan-column p {

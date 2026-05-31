@@ -64,7 +64,7 @@ export type AppState = {
   invariants: Check[];
 };
 
-export type PlanItem = { order_id: string; rationale: string };
+export type PlanItem = { order_id: string; rationale: string; committed: boolean };
 
 export type Triage = {
   capacity_tight: boolean;
