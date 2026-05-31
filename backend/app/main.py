@@ -7,11 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 
-FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "*")
-DB_PATH = Path(os.environ.get("TRIAGE_DB_PATH",
-    str(Path(__file__).resolve().parent.parent / "data" / "triage_events.sqlite")))
-store = EventStore(DB_PATH)
-
 from .engine import (
     EventStore,
     apply_triage,
@@ -27,7 +22,10 @@ from .engine import (
     timeline,
 )
 
-
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "*")
+DB_PATH = Path(os.environ.get("TRIAGE_DB_PATH",
+    str(Path(__file__).resolve().parent.parent / "data" / "triage_events.sqlite")))
+store = EventStore(DB_PATH)
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "triage_events.sqlite"
 store = EventStore(DB_PATH)
 
