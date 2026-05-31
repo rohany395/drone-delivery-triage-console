@@ -1,31 +1,68 @@
 # Drone Delivery Triage Console
 
-A focused full-stack demo for one operator decision: when a drone delivery nest loses capacity or demand spikes, what should be protected, deferred, or moved to ground fallback?
+**Live demo:** https://drone-delivery-triage-console-jv5pmjc1g.vercel.app/
+*(Backend runs on a free Render instance that sleeps when idle — the first load after inactivity may take 30–60s to wake. Give it a moment.)*
 
-The project is intentionally scoped to one Zipline-style nest, six aircraft, a rolling queue, a simulated clock, capacity-aware triage, operator overrides, auditability, and live reconciliation checks.
+A focused full-stack tool for one hard operator decision: **when a drone-delivery nest loses capacity or demand spikes, what gets protected, what gets deferred, and what falls back to ground transport?**
 
-## Stack
+When a storm grounds aircraft or a hospital emergency batch lands all at once, a unit of emergency blood and a retail order are competing for the same fleet — and the wrong thing slipping has very different consequences. This console gives a nest operator real-time visibility into that strain, proposes a triage plan that protects clinical-critical deliveries, lets the operator intervene with an attributed reason, and proves on screen that nothing is lost or double-assigned along the way.
 
-- `backend/`: FastAPI, SQLite, deterministic simulator, event-sourced state fold, triage engine.
-- `frontend/`: Vite, React, TypeScript, dense operational console.
-- API style: JSON REST plus polling. WebSockets/SSE are a documented future upgrade, not needed for this demo.
+It is built as a focused demonstration of how I'd approach the kind of operational software in  brief — *"keep the network moving when demand shifts, weather changes, assets degrade, or capacity gets tight"*.
 
-## Run Locally
+---
 
-Install backend dependencies:
+## What it does
+
+- **Live ops board** — a single nest, six aircraft, and a rolling order queue advancing on a simulated clock you control (Step / Play / Pause). A capacity gauge flips from healthy to constrained as strain builds.
+- **Explainable triage** — when capacity can't meet demand, the engine ranks orders by priority tier → SLA urgency → payload efficiency and partitions them into *protect now / defer / ground fallback*, each with a one-line human-readable rationale, shown against a naive FIFO baseline so the value is obvious.
+- **Operator intervention** — apply the plan wholesale or override any single order; overrides require an operator and a reason, and deferring a clinical-critical (P0) order demands an explicit logged justification.
+- **Auditability and live reconciliation** — every state change is an appended event; an order's full timeline is reconstructable from the log, and a reconciliation panel continuously proves five correctness invariants hold.
+
+## Try it (90-second walkthrough)
+
+1. The board loads **paused** and healthy — fleet ready, queue flowing, reconciliation all green. Click any order to see its event-sourced timeline.
+2. Click **Step** a few times to advance the clock and watch orders get assigned, fly, deliver, and recharge.
+3. Click **Storm front** — aircraft are grounded, the gauge goes red, and the triage panel activates with a plan that protects every medical order and defers retail.
+4. Click **Apply plan**, or **Override** one order with a reason — the action is logged with your name and shows in the audit panel.
+5. Throughout, the reconciliation panel confirms no order is lost or double-assigned, and no P0 was deferred without authorization.
+
+---
+
+## Architecture
+
+The backend is **event-sourced**: every change — order created, mission launched, mission aborted, operator override — is an immutable row in an append-only `events` table. Current state is derived by *folding* that log on each read. This is the spine of the correctness story:
+
+- **Order timelines are reconstructable** purely from events.
+- **Interventions are attributed** (operator + reason) and live in the same log.
+- **Reconciliation checks read from the same source as the UI**, so what the operator sees and what the system guarantees can't drift apart.
+
+The five invariants are deliberately *substantive*, not just state-validity checks:
+
+| Invariant | What it actually verifies |
+|---|---|
+| No lost orders | Conservation: every created order appears exactly once in the folded state — none dropped, none duplicated |
+| No double-assignment | No aircraft or order is bound to more than one active mission |
+| Timeline reconstructable | Replaying an order's own events reproduces its current folded state |
+| Attributed interventions | Every operator action carries a non-empty operator and reason |
+| P0 protection | A deferred clinical-critical order exists only if a logged override authorized it — silent/automatic P0 deferral is forbidden |
+
+## Tech stack
+
+- **Backend:** FastAPI, SQLite (append-only event store), a deterministic simulator, an event-fold state derivation, and an explainable triage engine. Pytest suite covers the invariants and scenarios.
+- **Frontend:** Vite + React + TypeScript — a dense operational console.
+- **API style:** JSON REST with polling. WebSocket/SSE push is a documented future upgrade, not needed for this demo.
+
+## Run locally
+
+Backend:
 
 ```bash
 python -m pip install -r backend/requirements.txt
-```
-
-Start the API:
-
-```bash
 cd backend
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Install and start the frontend:
+Frontend:
 
 ```bash
 cd frontend
@@ -35,57 +72,17 @@ npm run dev
 
 Open `http://127.0.0.1:5173`.
 
-## Verification
-
 Backend tests:
 
 ```bash
 python -m pytest backend/tests -q
 ```
 
-Frontend build:
+## Deployment
 
-```bash
-cd frontend
-npm run build
-```
+- **Frontend** is deployed to Vercel (static Vite build). The API base is configured via the `VITE_API_URL` environment variable.
+- **Backend** is deployed to Render as a persistent service, with CORS locked to the frontend origin via `FRONTEND_ORIGIN`.
 
-## Demo Script
+---
 
-1. Start from the normal board: fleet status, live clock, queue rank, active missions, and reconciliation checks are visible.
-2. Click `Storm front`: roughly half the idle fleet becomes grounded, the nest degrades, and capacity pressure increases.
-3. Review the triage panel: P0 and medical orders are protected, retail is deferred or sent to ground fallback, and FIFO baseline risk is shown.
-4. Click `Apply plan` or override a single order. Manual overrides require operator and reason, and P0 deferral requires an explicit reason.
-5. Click any order row to open its event-sourced timeline. Check the audit panel for attributed interventions and invariant status.
-
-## API
-
-- `GET /api/state`: folded current state, metrics, active missions, invariants.
-- `GET /api/triage`: current triage plan plus FIFO baseline.
-- `POST /api/scenarios/storm-front`
-- `POST /api/scenarios/aircraft-down`
-- `POST /api/scenarios/demand-spike`
-- `POST /api/triage/apply`
-- `POST /api/orders/{order_id}/override`
-- `GET /api/orders/{order_id}/timeline`
-- `GET /api/audit`
-- `POST /api/sim/tick`
-- `POST /api/sim/reset`
-
-## Architecture Notes
-
-The backend stores every change in an append-only SQLite `events` table. Current state is derived by folding the event log. That keeps the correctness story legible: order timelines are reconstructable, interventions are attributed, and reconciliation checks can be computed from the same source as the UI.
-
-Triage ranking is intentionally explainable:
-
-1. priority tier: `P0 > P1 > P2`
-2. SLA urgency
-3. payload efficiency as a tiebreaker
-
-The generated plan partitions pending orders into `protect_now`, `defer`, and `ground_fallback`. P0 orders are never auto-deferred; a manual P0 deferral must carry a clear reason in the event log.
-
-## Scope Guardrails
-
-In scope: one nest, local simulator, deterministic seed data, disruption scenarios, triage, interventions, audit, timelines, reconciliation.
-
-Out of scope: real maps, real weather feeds, real aircraft telemetry, autonomy, auth, multi-tenant operations, billing, ML forecasting, and multi-nest rerouting.
+*Built by Rohan as a portfolio project. Feedback welcome.*
