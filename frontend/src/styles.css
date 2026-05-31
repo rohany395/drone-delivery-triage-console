@@ -220,7 +220,15 @@ small {
 }
 
 .audit-panel {
-  grid-column: 3;
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+}
+
+.audit-panel .panel-title {
+  grid-column: 1 / -1;
 }
 
 .panel-title {
@@ -569,7 +577,6 @@ small {
 }
 
 .audit-list {
-  margin-top: 12px;
   max-height: 260px;
   overflow: auto;
 }
@@ -693,6 +700,14 @@ small {
   .triage-panel,
   .audit-panel {
     grid-column: 1 / -1;
+  }
+
+  .audit-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-panel .panel-title {
+    grid-column: auto;
   }
 }
 
