@@ -113,6 +113,27 @@ def test_storm_after_ticks_aborts_flights_and_preserves_invariants(tmp_path: Pat
     assert all(check["ok"] for check in ticked["invariants"])
 
 
+def test_triage_includes_committed_override_in_target_column_only(tmp_path: Path):
+    store = make_store(tmp_path)
+    storm = inject_storm(store)
+    protected_order_id = storm["orders"][0]["id"]
+
+    override_order(store, protected_order_id, "ground_fallback", "Rohan", "Operator moved this order to ground courier.")
+    triage = make_triage(fold(store.list()))
+
+    locations = [
+        column
+        for column, items in triage["plan"].items()
+        if any(item["order_id"] == protected_order_id for item in items)
+    ]
+    committed_item = next(item for item in triage["plan"]["ground_fallback"] if item["order_id"] == protected_order_id)
+
+    assert locations == ["ground_fallback"]
+    assert triage["plan"]["ground_fallback"][0]["order_id"] == protected_order_id
+    assert committed_item["committed"] is True
+    assert committed_item["rationale"] == "Moved by operator override."
+
+
 def test_timeline_reconstructs_order_history(tmp_path: Path):
     store = make_store(tmp_path)
     override_order(store, "O-003", "ground_fallback", "Rohan", "Protecting medical launch capacity.")
