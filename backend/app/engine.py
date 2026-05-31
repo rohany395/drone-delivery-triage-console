@@ -281,6 +281,7 @@ def fold(events: list[Event]) -> dict[str, Any]:
     orders = list(state["orders"].values())
     active_missions = [m for m in state["missions"].values() if m.get("state") == "active"]
     pending = [o for o in orders if o.get("state") == "pending"]
+    deferred = [o for o in orders if o.get("state") == "deferred"]
     risky = [o for o in orders if o.get("state") in {"pending", "assigned", "in_flight"} and o["promised_by"] - state["clock"] <= 18]
     operational = [a for a in state["fleet"].values() if a.get("state") in {"ready", "charging", "in_flight"}]
     ready = [a for a in state["fleet"].values() if a.get("state") == "ready"]
@@ -297,7 +298,7 @@ def fold(events: list[Event]) -> dict[str, Any]:
         "throughput_per_hour": throughput,
         "demand_per_hour": demand_rate,
         "sla_risk": len(risky),
-        "capacity_tight": len(pending) > max(8, len(operational) * 5) or demand_rate > throughput * 1.15,
+        "capacity_tight": (len(pending) + len(deferred)) > max(8, len(operational) * 5) or demand_rate > throughput * 1.15,
     }
     state["invariants"] = check_invariants(state, events)
     del state["events"]
@@ -522,8 +523,30 @@ def tick(store: EventStore, minutes: int = 1) -> dict[str, Any]:
         if aircraft["state"] == "charging" and aircraft.get("charge_complete_at") is not None and aircraft["charge_complete_at"] <= new_clock:
             store.append("AIRCRAFT_STATUS_SET", "aircraft", aircraft["id"], {"state": "ready", "battery_pct": 96, "charge_complete_at": None})
     state = fold(store.list())
-    if state["nest"].get("weather_state") == "storm_front":
-        return state
+    recovered = False
+    for aircraft in state["fleet"]:
+        if (
+            aircraft["state"] == "grounded"
+            and aircraft.get("grounded_until") is not None
+            and aircraft["grounded_until"] <= new_clock
+        ):
+            store.append(
+                "AIRCRAFT_STATUS_SET",
+                "aircraft",
+                aircraft["id"],
+                {"state": "ready", "battery_pct": 96, "grounded_until": None},
+            )
+            recovered = True
+    if recovered:
+        state = fold(store.list())
+        if state["nest"].get("weather_state") == "storm_front" and not any(a["state"] == "grounded" for a in state["fleet"]):
+            store.append("NEST_WEATHER_SET", "nest", "NEST-01", {"weather_state": "nominal", "status": "nominal"})
+            state = fold(store.list())
+    if not state["metrics"]["capacity_tight"]:
+        for order in state["orders"]:
+            if order["state"] == "deferred":
+                store.append("ORDER_STATE_SET", "order", order["id"], {"state": "pending"})
+        state = fold(store.list())
     ready_aircraft = [a for a in state["fleet"] if a["state"] == "ready" and a["battery_pct"] >= 35]
     pending = [o for o in state["orders"] if o["state"] == "pending"]
     for aircraft, order in zip(ready_aircraft, sorted(pending, key=lambda o: order_sort_key(o, state["clock"]))):
@@ -546,7 +569,7 @@ def inject_storm(store: EventStore) -> dict[str, Any]:
     to_ground_count = max(0, len(groundable) - 2)
     active_by_aircraft = {mission["aircraft_id"]: mission for mission in state["active_missions"]}
     for aircraft in groundable[:to_ground_count]:
-        grounded_until = state["clock"] + 30
+        grounded_until = state["clock"] + 12
         mission = active_by_aircraft.get(aircraft["id"])
         if mission:
             store.append(

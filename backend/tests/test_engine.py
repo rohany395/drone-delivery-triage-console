@@ -113,6 +113,41 @@ def test_storm_after_ticks_aborts_flights_and_preserves_invariants(tmp_path: Pat
     assert all(check["ok"] for check in ticked["invariants"])
 
 
+def test_storm_does_not_freeze_p0_delivery(tmp_path: Path):
+    store = make_store(tmp_path)
+    inject_storm(store)
+    apply_triage(store, "Rohan")
+    before = {o["id"] for o in fold(store.list())["orders"] if o["priority_tier"] == "P0" and o["state"] == "pending"}
+    for _ in range(12):
+        tick(store)
+    state = fold(store.list())
+    after = {o["id"] for o in state["orders"] if o["priority_tier"] == "P0" and o["state"] == "pending"}
+    assert after < before
+    assert all(c["ok"] for c in state["invariants"])
+
+
+def test_storm_recovers_and_clears(tmp_path: Path):
+    store = make_store(tmp_path)
+    assert inject_storm(store)["nest"]["weather_state"] == "storm_front"
+    for _ in range(40):
+        tick(store)
+    state = fold(store.list())
+    assert state["nest"]["weather_state"] == "nominal"
+    assert not any(o["priority_tier"] == "P0" and o["state"] == "pending" for o in state["orders"])
+    assert all(c["ok"] for c in state["invariants"])
+
+
+def test_deferred_orders_resume_after_recovery(tmp_path: Path):
+    store = make_store(tmp_path)
+    inject_storm(store)
+    apply_triage(store, "Rohan")
+    for _ in range(40):
+        tick(store)
+    state = fold(store.list())
+    assert not any(o["state"] == "deferred" for o in state["orders"])
+    assert all(c["ok"] for c in state["invariants"])
+
+
 def test_triage_includes_committed_override_in_target_column_only(tmp_path: Path):
     store = make_store(tmp_path)
     storm = inject_storm(store)
