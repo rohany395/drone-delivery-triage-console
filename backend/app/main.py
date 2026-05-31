@@ -5,6 +5,12 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import os
+
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "*")
+DB_PATH = Path(os.environ.get("TRIAGE_DB_PATH",
+    str(Path(__file__).resolve().parent.parent / "data" / "triage_events.sqlite")))
+store = EventStore(DB_PATH)
 
 from .engine import (
     EventStore,
@@ -28,8 +34,8 @@ store = EventStore(DB_PATH)
 app = FastAPI(title="Drone Delivery Triage Console API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[FRONTEND_ORIGIN] if FRONTEND_ORIGIN != "*" else ["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
